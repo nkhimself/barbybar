@@ -1,0 +1,117 @@
+# Builds a TEST Android app (debug APK) for BarByBar from the files in this repository.
+# Run it: Actions tab -> "Build Android APK" -> Run workflow. Download the APK from the finished run (Artifacts).
+name: Build Android APK
+on: workflow_dispatch
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Collect the app files
+        run: |
+          mkdir -p build/www
+          cp index.html sw.js manifest.json icon-192.png icon-512.png icon-maskable-512.png build/www/
+
+      - name: Create the Android project
+        working-directory: build
+        run: |
+          npm init -y
+          npm install @capacitor/core@7 @capacitor/cli@7 @capacitor/android@7
+          npx cap init "BarByBar" app.barbybar.replay --web-dir www
+          npx cap add android
+          npx cap sync android
+          M=android/app/src/main/AndroidManifest.xml
+          sed -i 's/android:allowBackup="true"/android:allowBackup="false"/' $M
+          sed -i 's/android:name=".MainActivity"/android:name=".MainActivity" android:screenOrientation="sensorLandscape"/' $M
+          grep -n "allowBackup\|screenOrientation" $M
+          grep -q 'sensorLandscape' $M
+
+      - name: Full screen and keep the screen on
+        working-directory: build
+        run: |
+          F=$(find android/app/src/main/java -name MainActivity.java)
+          echo "MainActivity: $F"
+          cat > "$F" <<'JAVA'
+          package app.barbybar.replay;
+
+          import android.os.Bundle;
+          import android.view.View;
+          import android.view.WindowManager;
+          import com.getcapacitor.BridgeActivity;
+
+          public class MainActivity extends BridgeActivity {
+              @Override
+              public void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  hideBars();
+              }
+
+              @Override
+              public void onWindowFocusChanged(boolean hasFocus) {
+                  super.onWindowFocusChanged(hasFocus);
+                  if (hasFocus) hideBars();
+              }
+
+              private void hideBars() {
+                  getWindow().getDecorView().setSystemUiVisibility(
+                      View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                      | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                      | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                      | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                      | View.SYSTEM_UI_FLAG_FULLSCREEN
+                      | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+              }
+          }
+          JAVA
+
+      - name: Use the BarByBar icon and launch screen
+        working-directory: build
+        run: |
+          pip install pillow
+          python3 - <<'PY'
+          import glob, os, shutil
+          from PIL import Image
+          res = 'android/app/src/main/res'
+          src = Image.open('www/icon-512.png').convert('RGBA')
+          sizes = {'mdpi': 48, 'hdpi': 72, 'xhdpi': 96, 'xxhdpi': 144, 'xxxhdpi': 192}
+          n = 0
+          for d, s in sizes.items():
+              folder = os.path.join(res, 'mipmap-' + d)
+              os.makedirs(folder, exist_ok=True)
+              for name in ('ic_launcher', 'ic_launcher_round', 'ic_launcher_foreground'):
+                  src.resize((s, s), Image.LANCZOS).save(os.path.join(folder, name + '.png'))
+                  n += 1
+          print('launcher icons written:', n)
+          shutil.rmtree(os.path.join(res, 'mipmap-anydpi-v26'), ignore_errors=True)
+          m = 0
+          for f in glob.glob(res + '/**/splash*.png', recursive=True):
+              w, h = Image.open(f).size
+              Image.new('RGB', (w, h), (15, 27, 45)).save(f)
+              m += 1
+          print('launch screens replaced:', m)
+          assert n == 15
+          PY
+
+      - name: Build the debug APK
+        working-directory: build/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: barbybar-debug-apk
+          path: build/android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 14
